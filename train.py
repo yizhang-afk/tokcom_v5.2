@@ -54,7 +54,7 @@ class TrainConfig:
     # Sampling
     sample_every: int = 1  # Sample every N epochs
     num_sample_steps: int = 50  # Number of denoising steps for sampling
-    num_samples: int = 2  # Number of samples to generate
+    num_samples: int = 10  # Number of samples to generate
 
 
 # ============================================================================
