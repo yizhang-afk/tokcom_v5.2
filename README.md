@@ -1,105 +1,121 @@
 # TokCom v5.2
 
-Token Compression with VAE and Diffusion Model for text generation and reconstruction.
+基于 VAE 和扩散模型的文本压缩与生成系统。
 
-## Overview
+## 概述
 
-TokCom v5.2 is a two-stage model that combines:
-1. **VAE (Variational Autoencoder)**: Compresses token sequences into latent vectors
-2. **Diffusion Model**: Learns to denoise latent vectors using flow matching
+TokCom v5.2 是一个两阶段训练的模型：
+1. **VAE (变分自编码器)**: 将 token 序列压缩为潜在向量
+2. **扩散模型**: 使用 Flow Matching 学习潜在空间的去噪
 
-### Architecture
+### 模型架构
 
-- **Tokenizer**: `meta-llama/CodeLlama-7b-hf`
-- **Sequence Length**: 1024 tokens
-- **Chunk Size**: 4 tokens per latent vector
-- **Num Chunks**: 256 latent vectors per sequence
-- **Hidden Size**: 896
-- **Transformer Layers**: 24 (both VAE and Diffusion)
+| 参数 | 值 |
+|------|-----|
+| Tokenizer | `meta-llama/CodeLlama-7b-hf` |
+| 序列长度 | 1024 tokens |
+| Chunk 大小 | 4 tokens/latent vector |
+| Chunk 数量 | 256 latent vectors/序列 |
+| 隐藏层维度 | 896 |
+| Transformer 层数 | 24 (VAE 和扩散模型相同) |
 
-## Installation
+## 安装依赖
 
 ```bash
 pip install torch transformers datasets tqdm wandb
 ```
 
-## Project Structure
+## 项目结构
 
 ```
 TokCom_v5.2_zy/
-├── model.py        # Model definitions (VAE, DenoisedModel)
-├── dataset.py      # WikiText dataset processing
-├── train.py        # Training script with wandb logging
-├── inference.py    # Inference and generation script
-├── config.py       # Model configuration (JSON)
+├── model.py        # 模型定义 (VAE, DenoisedModel)
+├── dataset.py      # WikiText 数据集处理
+├── train.py        # 训练脚本 (含 wandb 日志)
+├── inference.py    # 推理和生成脚本
+├── config.py       # 模型配置 (JSON)
 └── README.md
 ```
 
-## Training
+## 训练
 
-### Quick Start
+### 快速开始
 
 ```bash
 python train.py
 ```
 
-### Training Configuration
+### 训练配置
 
-Edit `TrainConfig` in `train.py`:
+在 `train.py` 中修改 `TrainConfig`:
 
 ```python
 class TrainConfig:
-    # Dataset
+    # 数据集
     dataset_name: str = "wikitext-2-raw-v1"
     tokenizer_path: str = "meta-llama/CodeLlama-7b-hf"
     max_length: int = 1024
     chunk_size: int = 4
 
-    # Training
+    # 训练参数
     batch_size: int = 8
     num_workers: int = 4
 
-    # Stage 1: VAE Training
+    # 阶段一: VAE 训练
     vae_epochs: int = 5
     vae_lr: float = 1e-4
 
-    # Stage 2: Diffusion Training
+    # 阶段二: 扩散模型训练
     diffusion_epochs: int = 10
     diffusion_lr: float = 3e-5
     noise_std: float = 0.05
 
-    # Sampling
-    sample_every: int = 1
-    num_sample_steps: int = 50
-    num_samples: int = 2
+    # 采样配置
+    sample_every: int = 1      # 每 N 个 epoch 采样一次
+    num_sample_steps: int = 50 # 去噪采样步数
+    num_samples: int = 2       # 采样数量
 
     # Wandb
     wandb_project: str = "TokCom-v5.2"
 ```
 
-### Training Stages
+### 训练阶段
 
-**Stage 1: VAE Training**
-- Trains encoder-decoder to reconstruct token sequences
-- Loss: Cross-entropy reconstruction loss
-- Output: `checkpoints/best_vae.pt`
+**阶段一: VAE 训练**
+- 训练编码器-解码器重建 token 序列
+- 损失函数: 交叉熵重建损失
+- 输出: `checkpoints/best_vae.pt`
 
-**Stage 2: Diffusion Training**
-- Freezes VAE, trains denoising model
-- Uses flow matching: `x_t = (1-t)*x0 + t*x1`
-- Loss: Cross-entropy through frozen VAE decoder
-- Output: `checkpoints/best_diffusion.pt`
+**阶段二: 扩散模型训练**
+- 冻结 VAE，训练去噪模型
+- 使用 Flow Matching: `x_t = (1-t)*x0 + t*x1`
+- 损失函数: 通过冻结的 VAE decoder 计算交叉熵
+- 输出: `checkpoints/best_diffusion.pt`
 
-### Wandb Logging
+### Wandb 日志
 
-The training script logs:
-- Batch-level losses (`vae/batch_loss`, `diffusion/batch_ce_loss`, `diffusion/batch_mse_loss`)
-- Epoch-level metrics (train/val losses, learning rate)
-- Sample reconstructions and generations as tables
+训练脚本会记录以下内容到 wandb：
 
-## Inference
+**Batch 级别**
+- `vae/batch_loss`: VAE 每个 batch 的损失
+- `diffusion/batch_ce_loss`: 扩散模型每个 batch 的交叉熵损失
+- `diffusion/batch_mse_loss`: 扩散模型每个 batch 的 MSE 损失
 
-### Generate from Noise
+**Epoch 级别**
+- 训练/验证损失
+- 学习率
+- 最佳验证损失
+
+**采样**
+- VAE 重建样本表格
+- 扩散模型生成样本表格
+- 去噪重建对比表格
+
+## 推理
+
+### 模式一: 从噪声生成
+
+从随机噪声生成新文本:
 
 ```bash
 python inference.py \
@@ -109,48 +125,72 @@ python inference.py \
     --batch_size 2
 ```
 
-### Reconstruct Text
+### 模式二: VAE 重建
+
+通过 VAE 编码-解码重建文本:
 
 ```bash
 python inference.py \
     --checkpoint checkpoints/best_diffusion.pt \
     --mode reconstruct \
-    --input_text "Your input text here"
+    --input_text "你要重建的文本内容"
 ```
 
-### Encode to Latent Vectors
+### 模式三: 去噪重建
+
+通过扩散模型去噪重建 (encode -> 加噪 -> 去噪 -> decode):
+
+```bash
+python inference.py \
+    --checkpoint checkpoints/best_diffusion.pt \
+    --mode denoise_reconstruct \
+    --input_text "你要重建的文本内容" \
+    --noise_level 0.5 \
+    --num_steps 50
+```
+
+`noise_level` 参数说明:
+- `0.0`: 纯噪声，完全丢失原始信息
+- `0.5`: 50% 噪声混合
+- `0.9`: 10% 噪声，保留大部分原始信息
+- `1.0`: 无噪声，等同于 VAE 重建
+
+### 模式四: 编码为潜在向量
+
+将文本编码为潜在向量并保存:
 
 ```bash
 python inference.py \
     --checkpoint checkpoints/best_diffusion.pt \
     --mode encode \
-    --input_text "Your input text here" \
+    --input_text "你要编码的文本内容" \
     --output_file latents.pt
 ```
 
-### Inference Arguments
+### 推理参数说明
 
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--checkpoint` | Path to checkpoint file | Required |
-| `--mode` | `generate`, `reconstruct`, or `encode` | `generate` |
-| `--input_text` | Input text (for reconstruct/encode) | None |
-| `--num_chunks` | Number of chunks to generate | 256 |
-| `--num_steps` | Denoising steps | 50 |
-| `--batch_size` | Batch size for generation | 1 |
-| `--device` | Device (cuda/cpu) | auto |
-| `--output_file` | Output file path | None |
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--checkpoint` | checkpoint 文件路径 | 必需 |
+| `--mode` | 推理模式 | `generate` |
+| `--input_text` | 输入文本 | None |
+| `--num_chunks` | 生成的 chunk 数量 | 256 |
+| `--num_steps` | 去噪步数 | 50 |
+| `--noise_level` | 噪声水平 (denoise_reconstruct 模式) | 0.5 |
+| `--batch_size` | 批次大小 | 1 |
+| `--device` | 设备 (cuda/cpu) | 自动检测 |
+| `--output_file` | 输出文件路径 | None |
 
-## Checkpoint Format
+## Checkpoint 格式
 
-Checkpoints contain:
+checkpoint 包含以下内容:
 
 ```python
 {
-    'epoch': int,
-    'stage': str,  # 'vae' or 'diffusion'
-    'val_loss': float,
-    'model_args': {
+    'epoch': int,              # 保存时的 epoch
+    'stage': str,              # 'vae' 或 'diffusion'
+    'val_loss': float,         # 验证集损失
+    'model_args': {            # 模型架构参数
         'hidden_size': 896,
         'num_hidden_layers': 24,
         'num_attention_heads': 14,
@@ -160,31 +200,38 @@ Checkpoints contain:
         'omni_token_id': int,
         ...
     },
-    'config': {
+    'config': {                # 训练/推理配置
         'tokenizer_path': str,
         'max_length': 1024,
         'chunk_size': 4,
         'noise_std': 0.05,
         ...
     },
-    'vae_model_state_dict': dict,
-    'denoised_model_state_dict': dict,
+    'vae_model_state_dict': dict,       # VAE 模型权重
+    'denoised_model_state_dict': dict,  # 扩散模型权重
 }
 ```
 
-## Loading Models Programmatically
+## 代码中加载模型
 
 ```python
 from model import TokComVAE, DenoisedModel, ModelArgs
-from inference import load_checkpoint, generate, reconstruct, encode, decode
+from inference import (
+    load_checkpoint,
+    generate,
+    reconstruct,
+    denoise_reconstruct,
+    encode,
+    decode
+)
 
-# Load models
+# 加载模型
 vae_model, denoised_model, model_args, config = load_checkpoint(
     "checkpoints/best_diffusion.pt",
     device="cuda"
 )
 
-# Generate from noise
+# 从噪声生成
 token_ids = generate(
     vae_model, denoised_model,
     num_chunks=256,
@@ -196,35 +243,36 @@ token_ids = generate(
     device="cuda"
 )
 
-# Decode to text
+# 解码为文本
 from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained(config['tokenizer_path'])
 text = tokenizer.decode(token_ids[0], skip_special_tokens=True)
+print(text)
 ```
 
-## Model Details
+## 模型细节
 
-### VAE Encoder
-- Input: Token IDs `(batch, chunk_size)`
-- Output: Latent vector `(batch, hidden_size)`
-- Uses last position as output vector
+### VAE 编码器
+- 输入: Token IDs `(batch, chunk_size)`
+- 输出: 潜在向量 `(batch, hidden_size)`
+- 使用最后一个位置作为输出向量
 
-### VAE Decoder
-- Input: Latent vector `(batch, hidden_size)`
-- Output: Logits `(batch, chunk_size, vocab_size)`
-- Uses Omni token for sequence generation
+### VAE 解码器
+- 输入: 潜在向量 `(batch, hidden_size)`
+- 输出: Logits `(batch, chunk_size, vocab_size)`
+- 使用 Omni token 进行序列生成
 
-### Diffusion Model
-- Architecture: 24-layer Transformer with adaLN-Zero
-- Conditioning: Timestep embedding
-- Prediction: Clean data `x1` from noisy input `x_t`
+### 扩散模型
+- 架构: 24 层 Transformer + adaLN-Zero 条件化
+- 条件: 时间步嵌入
+- 预测目标: 从噪声输入 `x_t` 预测干净数据 `x1`
 
 ### Flow Matching
-- Forward: `x_t = (1-t)*x0 + t*x1`
-- `x0`: Noise ~ N(0, noise_std^2)
-- `x1`: Clean latent from VAE encoder
-- `t`: Timestep ~ U[0, 1]
+- 前向过程: `x_t = (1-t)*x0 + t*x1`
+- `x0`: 噪声 ~ N(0, noise_std²)
+- `x1`: VAE 编码器输出的干净潜在向量
+- `t`: 时间步 ~ U[0, 1]
 
-## License
+## 许可证
 
 MIT License
