@@ -46,7 +46,7 @@ class WikiTextDataset(Dataset):
         print(f"Loading tokenizer from {tokenizer_path}...")
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
-        self.bos_token_id = self.tokenizer.bos_token_idxs
+        self.bos_token_id = self.tokenizer.bos_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
 
         # Load dataset

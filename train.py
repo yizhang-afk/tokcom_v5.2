@@ -22,15 +22,15 @@ class TrainConfig:
     # Dataset
     dataset_name: str = "wikitext-2-raw-v1"
     tokenizer_path: str = "meta-llama/CodeLlama-7b-hf"
-    max_length: int = 1024
+    max_length: int = 256
     chunk_size: int = 4  # window_length
 
     # Training
-    batch_size: int = 8
+    batch_size: int = 16
     num_workers: int = 4
 
     # Stage 1: VAE Training
-    vae_epochs: int = 5
+    vae_epochs: int = 2
     vae_lr: float = 1e-4
     vae_weight_decay: float = 0.01
 
@@ -315,7 +315,8 @@ def sample_and_log_vae(
     input_ids = batch['input_ids'].to(device)
     batch_size, num_chunks, chunk_size = input_ids.shape
 
-    # Take only num_samples
+    # Take only num_samples (ensure we don't exceed batch size)
+    num_samples = min(num_samples, batch_size)
     input_ids = input_ids[:num_samples]
 
     # Flatten to (num_samples, seq_len)
@@ -365,6 +366,9 @@ def sample_and_log_diffusion(
     batch = next(iter(val_loader))
     input_ids = batch['input_ids'].to(config.device)
     batch_size, num_chunks, chunk_size = input_ids.shape
+
+    # Ensure we don't exceed batch size for reconstruction samples
+    num_samples = min(num_samples, batch_size)
 
     # 1. Generate from noise
     print(f"  Generating {num_samples} samples from noise...")

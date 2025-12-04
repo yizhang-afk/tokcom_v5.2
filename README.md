@@ -22,7 +22,7 @@ TokCom v5.2 是一个两阶段训练的模型：
 ## 安装依赖
 
 ```bash
-pip install torch transformers datasets tqdm wandb
+pip install torch transformers datasets tqdm wandb hf_transfer
 ```
 
 ## 项目结构
