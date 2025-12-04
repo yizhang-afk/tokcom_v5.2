@@ -237,14 +237,82 @@ def reconstruct(
     return reconstructed_ids
 
 
+@torch.no_grad()
+def denoise_reconstruct(
+    vae_model: TokComVAE,
+    denoised_model: DenoisedModel,
+    input_ids: torch.Tensor,
+    chunk_size: int,
+    noise_std: float = 0.05,
+    noise_level: float = 0.5,
+    num_steps: int = 50
+) -> torch.Tensor:
+    """
+    Reconstruct input through diffusion: encode -> add noise -> denoise -> decode.
+
+    Args:
+        vae_model: VAE model
+        denoised_model: Denoising model
+        input_ids: Input token ids of shape (batch_size, seq_len)
+        chunk_size: Size of each chunk
+        noise_std: Standard deviation for noise
+        noise_level: Noise level t in [0, 1], where 0 = pure noise, 1 = clean
+        num_steps: Number of denoising steps
+
+    Returns:
+        Reconstructed token ids of shape (batch_size, seq_len)
+    """
+    batch_size = input_ids.shape[0]
+    device = input_ids.device
+
+    # 1. Encode to latent
+    x1 = encode(vae_model, input_ids, chunk_size)  # (batch_size, num_chunks, hidden_size)
+
+    # 2. Add noise at level t = noise_level
+    # x_t = (1-t)*x0 + t*x1, where x0 is noise
+    x0 = sample_noise(x1.shape, device=device, std=noise_std)
+    t = noise_level
+    x_t = (1 - t) * x0 + t * x1
+
+    # 3. Denoise from t to 1
+    # We need to integrate from current t to t=1
+    remaining_steps = int(num_steps * (1 - t))
+    if remaining_steps < 1:
+        remaining_steps = 1
+
+    dt = (1.0 - t) / remaining_steps
+    current_t = t
+
+    for step in range(remaining_steps):
+        t_tensor = torch.full((batch_size,), current_t, device=device)
+
+        # Predict x1 from current x_t
+        x1_pred = denoised_model(x_t, t_tensor)
+
+        # Compute velocity and update
+        if current_t < 1.0 - 1e-6:
+            velocity = (x1_pred - x_t) / (1.0 - current_t)
+            x_t = x_t + velocity * dt
+        else:
+            x_t = x1_pred
+
+        current_t += dt
+
+    # 4. Decode to tokens
+    reconstructed_ids = decode(vae_model, x_t, chunk_size)
+
+    return reconstructed_ids
+
+
 def main():
     parser = argparse.ArgumentParser(description="TokCom v5.2 Inference")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint file")
-    parser.add_argument("--mode", type=str, choices=["generate", "reconstruct", "encode"], default="generate",
-                        help="Inference mode: generate (from noise), reconstruct (encode-decode), encode (get latents)")
-    parser.add_argument("--input_text", type=str, default=None, help="Input text for reconstruct/encode mode")
+    parser.add_argument("--mode", type=str, choices=["generate", "reconstruct", "denoise_reconstruct", "encode"], default="generate",
+                        help="Inference mode: generate (from noise), reconstruct (VAE only), denoise_reconstruct (encode-noise-denoise-decode), encode (get latents)")
+    parser.add_argument("--input_text", type=str, default=None, help="Input text for reconstruct/denoise_reconstruct/encode mode")
     parser.add_argument("--num_chunks", type=int, default=256, help="Number of chunks for generation (default: 256 = 1024 tokens)")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of denoising steps")
+    parser.add_argument("--noise_level", type=float, default=0.5, help="Noise level for denoise_reconstruct mode (0=pure noise, 1=clean)")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for generation")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device")
     parser.add_argument("--output_file", type=str, default=None, help="Output file path (optional)")
@@ -331,6 +399,58 @@ def main():
         # Calculate accuracy
         match = (input_ids[0] == reconstructed_ids[0]).float().mean().item()
         print(f"\nToken accuracy: {match * 100:.2f}%")
+
+    elif args.mode == "denoise_reconstruct":
+        if args.input_text is None:
+            print("Error: --input_text is required for denoise_reconstruct mode")
+            return
+
+        print(f"Input text: {args.input_text[:100]}..." if len(args.input_text) > 100 else f"Input text: {args.input_text}")
+        print(f"Noise level: {args.noise_level} (0=pure noise, 1=clean)")
+        print(f"Denoising steps: {args.num_steps}")
+
+        # Tokenize input
+        input_ids = tokenizer.encode(args.input_text, add_special_tokens=False, return_tensors="pt")
+        input_ids = input_ids.to(args.device)
+
+        # Pad or truncate to max_length
+        if input_ids.shape[1] < max_length:
+            padding = torch.full((1, max_length - input_ids.shape[1]), tokenizer.eos_token_id, device=args.device)
+            input_ids = torch.cat([input_ids, padding], dim=1)
+        else:
+            input_ids = input_ids[:, :max_length]
+
+        # Denoise reconstruct
+        reconstructed_ids = denoise_reconstruct(
+            vae_model, denoised_model, input_ids, chunk_size,
+            noise_std=noise_std, noise_level=args.noise_level, num_steps=args.num_steps
+        )
+
+        # Decode
+        original_text = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        reconstructed_text = tokenizer.decode(reconstructed_ids[0], skip_special_tokens=True)
+
+        print("\nOriginal:")
+        print("-" * 60)
+        print(original_text[:500] + "..." if len(original_text) > 500 else original_text)
+
+        print("\nDenoised Reconstruction:")
+        print("-" * 60)
+        print(reconstructed_text[:500] + "..." if len(reconstructed_text) > 500 else reconstructed_text)
+
+        # Calculate accuracy
+        match = (input_ids[0] == reconstructed_ids[0]).float().mean().item()
+        print(f"\nToken accuracy: {match * 100:.2f}%")
+
+        # Also show VAE-only reconstruction for comparison
+        vae_reconstructed_ids = reconstruct(vae_model, input_ids, chunk_size)
+        vae_reconstructed_text = tokenizer.decode(vae_reconstructed_ids[0], skip_special_tokens=True)
+        vae_match = (input_ids[0] == vae_reconstructed_ids[0]).float().mean().item()
+
+        print("\nVAE-only Reconstruction (for comparison):")
+        print("-" * 60)
+        print(vae_reconstructed_text[:500] + "..." if len(vae_reconstructed_text) > 500 else vae_reconstructed_text)
+        print(f"\nVAE-only Token accuracy: {vae_match * 100:.2f}%")
 
     elif args.mode == "encode":
         if args.input_text is None:
