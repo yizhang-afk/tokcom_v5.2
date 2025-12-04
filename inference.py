@@ -304,13 +304,102 @@ def denoise_reconstruct(
     return reconstructed_ids
 
 
+@torch.no_grad()
+def conditional_generate(
+    vae_model: TokComVAE,
+    denoised_model: DenoisedModel,
+    prompt_ids: torch.Tensor,
+    chunk_size: int,
+    num_generate_chunks: int,
+    noise_std: float = 0.05,
+    num_steps: int = 50
+) -> torch.Tensor:
+    """
+    Conditional generation: given a prompt, generate continuation.
+
+    Process:
+    1. Encode prompt to latent vectors
+    2. Generate noise latent vectors for continuation
+    3. Concatenate prompt latents and noise latents
+    4. Denoise the concatenated sequence
+    5. Decode to tokens
+
+    Args:
+        vae_model: VAE model
+        denoised_model: Denoising model
+        prompt_ids: Prompt token ids of shape (batch_size, prompt_len)
+                    prompt_len must be divisible by chunk_size
+        chunk_size: Size of each chunk
+        num_generate_chunks: Number of chunks to generate after prompt
+        noise_std: Standard deviation for noise
+        num_steps: Number of denoising steps
+
+    Returns:
+        Generated token ids of shape (batch_size, total_seq_len)
+        where total_seq_len = prompt_len + num_generate_chunks * chunk_size
+    """
+    batch_size = prompt_ids.shape[0]
+    device = prompt_ids.device
+
+    # 1. Encode prompt to latent vectors
+    prompt_latents = encode(vae_model, prompt_ids, chunk_size)  # (batch_size, num_prompt_chunks, hidden_size)
+    num_prompt_chunks = prompt_latents.shape[1]
+    hidden_size = prompt_latents.shape[2]
+
+    # 2. Generate noise for continuation
+    noise_latents = sample_noise(
+        (batch_size, num_generate_chunks, hidden_size),
+        device=device,
+        std=noise_std
+    )
+
+    # 3. Concatenate: [prompt_latents, noise_latents]
+    # prompt_latents are clean (t=1), noise_latents are pure noise (t=0)
+    combined_latents = torch.cat([prompt_latents, noise_latents], dim=1)
+    # combined_latents: (batch_size, num_prompt_chunks + num_generate_chunks, hidden_size)
+
+    total_chunks = num_prompt_chunks + num_generate_chunks
+
+    # 4. Denoise with Euler integration from t=0 to t=1
+    # For the prompt part, we keep it mostly unchanged (already at t=1)
+    # For the noise part, we need to denoise (from t=0 to t=1)
+
+    # We use a mask-based approach: gradually blend the denoised output
+    dt = 1.0 / num_steps
+    x_t = combined_latents.clone()
+
+    for step in range(num_steps):
+        t = step * dt
+        t_tensor = torch.full((batch_size,), t, device=device)
+
+        # Predict x1 for the entire sequence (model sees full context)
+        x1_pred = denoised_model(x_t, t_tensor)
+
+        # Update only the generation part, keep prompt part as-is
+        if t < 1.0 - 1e-6:
+            velocity = (x1_pred - x_t) / (1.0 - t)
+            x_t_new = x_t + velocity * dt
+
+            # Keep prompt latents unchanged, only update generated part
+            x_t = torch.cat([prompt_latents, x_t_new[:, num_prompt_chunks:, :]], dim=1)
+        else:
+            x_t = torch.cat([prompt_latents, x1_pred[:, num_prompt_chunks:, :]], dim=1)
+
+    # 5. Decode to tokens
+    token_ids = decode(vae_model, x_t, chunk_size)
+
+    return token_ids
+
+
 def main():
     parser = argparse.ArgumentParser(description="TokCom v5.2 Inference")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint file")
-    parser.add_argument("--mode", type=str, choices=["generate", "reconstruct", "denoise_reconstruct", "encode"], default="generate",
-                        help="Inference mode: generate (from noise), reconstruct (VAE only), denoise_reconstruct (encode-noise-denoise-decode), encode (get latents)")
+    parser.add_argument("--mode", type=str, choices=["generate", "reconstruct", "denoise_reconstruct", "encode", "conditional"], default="generate",
+                        help="Inference mode: generate (from noise), reconstruct (VAE only), denoise_reconstruct (encode-noise-denoise-decode), encode (get latents), conditional (prompt-based generation)")
     parser.add_argument("--input_text", type=str, default=None, help="Input text for reconstruct/denoise_reconstruct/encode mode")
+    parser.add_argument("--prompt", type=str, default=None, help="Prompt text for conditional generation mode")
     parser.add_argument("--num_chunks", type=int, default=256, help="Number of chunks for generation (default: 256 = 1024 tokens)")
+    parser.add_argument("--num_generate_chunks", type=int, default=64, help="Number of chunks to generate after prompt in conditional mode (default: 64 = 256 tokens)")
     parser.add_argument("--num_steps", type=int, default=50, help="Number of denoising steps")
     parser.add_argument("--noise_level", type=float, default=0.5, help="Noise level for denoise_reconstruct mode (0=pure noise, 1=clean)")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size for generation")
@@ -482,6 +571,74 @@ def main():
         if args.output_file:
             torch.save(latent_vectors, args.output_file)
             print(f"\nLatent vectors saved to {args.output_file}")
+
+    elif args.mode == "conditional":
+        if args.prompt is None:
+            print("Error: --prompt is required for conditional mode")
+            return
+
+        print(f"Prompt: {args.prompt[:100]}..." if len(args.prompt) > 100 else f"Prompt: {args.prompt}")
+        print(f"Generating {args.num_generate_chunks} chunks ({args.num_generate_chunks * chunk_size} tokens) after prompt")
+        print(f"Using {args.num_steps} denoising steps")
+
+        # Tokenize prompt
+        prompt_ids = tokenizer.encode(args.prompt, add_special_tokens=False, return_tensors="pt")
+        prompt_ids = prompt_ids.to(args.device)
+
+        # Pad prompt to be divisible by chunk_size
+        prompt_len = prompt_ids.shape[1]
+        padded_len = ((prompt_len + chunk_size - 1) // chunk_size) * chunk_size
+        if prompt_len < padded_len:
+            padding = torch.full((1, padded_len - prompt_len), tokenizer.eos_token_id, device=args.device)
+            prompt_ids = torch.cat([prompt_ids, padding], dim=1)
+
+        num_prompt_chunks = prompt_ids.shape[1] // chunk_size
+        print(f"Prompt: {prompt_len} tokens -> {num_prompt_chunks} chunks (padded to {padded_len} tokens)")
+
+        # Conditional generation
+        generated_ids = conditional_generate(
+            vae_model, denoised_model,
+            prompt_ids, chunk_size,
+            num_generate_chunks=args.num_generate_chunks,
+            noise_std=noise_std,
+            num_steps=args.num_steps
+        )
+
+        # Decode to text
+        generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+        # Show prompt vs generated
+        prompt_text = tokenizer.decode(prompt_ids[0], skip_special_tokens=True)
+        total_tokens = prompt_ids.shape[1] + args.num_generate_chunks * chunk_size
+
+        print("\n" + "=" * 60)
+        print("PROMPT (input):")
+        print("-" * 60)
+        print(prompt_text)
+
+        print("\n" + "=" * 60)
+        print("FULL GENERATED SEQUENCE (prompt + continuation):")
+        print("-" * 60)
+        print(generated_text[:1000] + "..." if len(generated_text) > 1000 else generated_text)
+
+        # Also show just the continuation part
+        # Reconstruct prompt through VAE to compare
+        prompt_reconstructed = reconstruct(vae_model, prompt_ids, chunk_size)
+        prompt_reconstructed_text = tokenizer.decode(prompt_reconstructed[0], skip_special_tokens=True)
+
+        print("\n" + "=" * 60)
+        print("PROMPT RECONSTRUCTION (VAE only, for comparison):")
+        print("-" * 60)
+        print(prompt_reconstructed_text)
+
+        prompt_accuracy = (prompt_ids[0] == prompt_reconstructed[0]).float().mean().item()
+        print(f"\nPrompt reconstruction accuracy: {prompt_accuracy * 100:.2f}%")
+
+        if args.output_file:
+            with open(args.output_file, 'w') as f:
+                f.write(f"Prompt:\n{prompt_text}\n\n")
+                f.write(f"Generated:\n{generated_text}\n")
+            print(f"\nOutput saved to {args.output_file}")
 
 
 if __name__ == "__main__":

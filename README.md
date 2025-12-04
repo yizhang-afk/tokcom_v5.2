@@ -167,14 +167,36 @@ python inference.py \
     --output_file latents.pt
 ```
 
+### 模式五: 条件生成
+
+给定 prompt，生成后续内容 (prompt encode -> 与噪声拼接 -> 去噪 -> decode):
+
+```bash
+python inference.py \
+    --checkpoint checkpoints/best_diffusion.pt \
+    --mode conditional \
+    --prompt "The family of four was " \
+    --num_generate_chunks 64 \
+    --num_steps 50
+```
+
+条件生成流程:
+1. 将 prompt 编码为 latent vectors
+2. 生成噪声 latent vectors 作为待生成部分
+3. 将 prompt latents 和噪声 latents 拼接
+4. 通过 diffusion model 去噪（保持 prompt 部分不变，只对噪声部分去噪）
+5. 解码得到完整序列（prompt + 生成内容）
+
 ### 推理参数说明
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--checkpoint` | checkpoint 文件路径 | 必需 |
 | `--mode` | 推理模式 | `generate` |
-| `--input_text` | 输入文本 | None |
-| `--num_chunks` | 生成的 chunk 数量 | 256 |
+| `--input_text` | 输入文本 (reconstruct/denoise_reconstruct/encode) | None |
+| `--prompt` | 提示文本 (conditional 模式) | None |
+| `--num_chunks` | 生成的 chunk 数量 (generate 模式) | 256 |
+| `--num_generate_chunks` | prompt 后生成的 chunk 数量 (conditional 模式) | 64 |
 | `--num_steps` | 去噪步数 | 50 |
 | `--noise_level` | 噪声水平 (denoise_reconstruct 模式) | 0.5 |
 | `--batch_size` | 批次大小 | 1 |
